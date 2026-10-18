@@ -1,78 +1,68 @@
-<h1 align="center">xinboots</h1>
-<p align="center"><i>Quiet design. Sharp code. Real projects.</i></p>
+<!--
+  Artwork lives in assets/ (original SVG, no external assets).
+  assets/activity*.svg is regenerated daily by .github/workflows/activity.yml.
+-->
 
 <p align="center">
-  Software Engineering Student building clean interfaces, smart ideas, and real products.
+  <picture>
+    <source media="(max-width: 600px)" srcset="assets/hero-mobile.svg">
+    <img src="assets/hero.svg" width="100%" alt="XINBOOTS. Crafting the unordinary. Cherry blossom branches against a night sky and a pale moon.">
+  </picture>
 </p>
 
----
+<br>
 
-## About Me
+<h3 align="center">
+  <picture><img src="assets/heading-about.svg" width="600" alt="About"></picture>
+</h3>
 
-Hey, I'm X.
-
-I'm a Software Engineering student focused on building modern interfaces, intelligent systems, and software with real purpose.
-
-I enjoy turning ideas into products with clarity, structure, and identity.
-
----
-
-## Current Focus
-
-- AI-powered product ideas
-- Frontend and interface design
-- Desktop and mobile application development
-- Building projects from concept to reality
-
----
-
-## Projects
-
-### BetIQ
-AI-powered football intelligence and analytics platform.
-
-- Predictive modeling
-- Historical data pipelines
-- Match analysis and insights
-- Modern application experience
-
-### MotoCast
-Weather-focused riding companion for motorcyclists.
-
-- Rider-oriented weather insights
-- Practical road condition awareness
-- Simple and focused user experience
-
----
-
-## Tech Stack
-
-<p>
-  <img src="https://img.shields.io/badge/Python-111111?style=for-the-badge&logo=python&logoColor=white" />
-  <img src="https://img.shields.io/badge/C%2B%2B-111111?style=for-the-badge&logo=c%2B%2B&logoColor=white" />
-  <img src="https://img.shields.io/badge/Java-111111?style=for-the-badge&logo=openjdk&logoColor=white" />
-  <img src="https://img.shields.io/badge/TypeScript-111111?style=for-the-badge&logo=typescript&logoColor=white" />
-  <img src="https://img.shields.io/badge/React-111111?style=for-the-badge&logo=react&logoColor=white" />
-  <img src="https://img.shields.io/badge/FastAPI-111111?style=for-the-badge&logo=fastapi&logoColor=white" />
-  <img src="https://img.shields.io/badge/Git-111111?style=for-the-badge&logo=git&logoColor=white" />
-  <img src="https://img.shields.io/badge/Linux-111111?style=for-the-badge&logo=linux&logoColor=white" />
+<p align="center">
+  Software Engineering student drawn to <b>intelligent systems</b>, <b>modern software</b> and <b>digital design</b>.
+  <br>
+  I like software that feels intentional: clean structure, thoughtful interfaces and a real purpose.
 </p>
 
----
+<p align="center">
+  <sub>CURRENTLY EXPLORING&ensp;·&ensp;AI-DRIVEN PRODUCTS&ensp;·&ensp;INTERFACE DESIGN&ensp;·&ensp;DESKTOP &amp; MOBILE APPS</sub>
+</p>
 
-## Philosophy
+<br>
 
-I like software that feels intentional.
+<h3 align="center">
+  <picture><img src="assets/heading-tools.svg" width="600" alt="Tech &amp; Tools"></picture>
+</h3>
 
-Clean structure, thoughtful design, and meaningful functionality matter to me more than unnecessary complexity.
+<p align="center">
+  <picture>
+    <source media="(max-width: 600px)" srcset="assets/tools-mobile.svg">
+    <img src="assets/tools.svg" width="100%" alt="Languages: Python, C++, Java, TypeScript. Frameworks: React, Flutter. Tooling: Git, Linux.">
+  </picture>
+</p>
 
----
+<br>
 
-## Connect
+<h3 align="center">
+  <picture><img src="assets/heading-activity.svg" width="600" alt="Activity"></picture>
+</h3>
 
-- GitHub: [github.com/x1nboots](https://github.com/x1nboots)
-- Email: xinboots@pm.me
+<p align="center">
+  <picture>
+    <source media="(max-width: 600px)" srcset="assets/activity-mobile.svg">
+    <img src="assets/activity.svg" width="100%" alt="GitHub activity over the past year: total contributions, active days, longest streak, commits, contributions per week, and languages by code volume in public repositories.">
+  </picture>
+  <br>
+  <sub>Rendered daily from public GitHub data by a workflow in this repository.</sub>
+</p>
 
----
+<br>
 
-<p align="center"><i>Built with discipline, curiosity, and a quiet aesthetic.</i></p>
+<p align="center">
+  <picture><img src="assets/divider.svg" width="600" alt=""></picture>
+</p>
+
+<p align="center">
+  <picture>
+    <source media="(max-width: 600px)" srcset="assets/signature-mobile.svg">
+    <img src="assets/signature.svg" width="100%" alt="Precision in code. Freedom in creation. Signed, xinboots.">
+  </picture>
+</p>

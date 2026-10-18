@@ -1,0 +1,48 @@
+name: Activity card
+
+# Re-renders assets/activity*.svg from public GitHub data and commits the
+# result only when it changed. Uses the built-in GITHUB_TOKEN; no third-party
+# services or packages are involved.
+
+on:
+  schedule:
+    - cron: "23 4 * * *" # daily at 04:23 UTC
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - "scripts/activity/**"
+      - ".github/workflows/activity.yml"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: activity-card
+  cancel-in-progress: false
+
+jobs:
+  render:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Render activity card
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          LOGIN: ${{ github.repository_owner }}
+        run: python3 scripts/activity/generate.py --login "$LOGIN" --out assets
+
+      - name: Commit if changed
+        run: |
+          git add assets/activity.svg assets/activity-mobile.svg
+          if git diff --cached --quiet; then
+            echo "Activity card unchanged."
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git commit -m "Refresh activity card"
+          git pull --rebase --quiet
+          git push
