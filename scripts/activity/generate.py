@@ -3,8 +3,9 @@
 
 Runs daily in GitHub Actions (.github/workflows/activity.yml) with the default
 GITHUB_TOKEN and only the Python standard library. Every number on the card
-comes straight from the GitHub GraphQL API. If the request fails, the script
-exits non-zero and the previously committed card is left untouched.
+comes straight from the GitHub GraphQL API. If a request fails or a response is
+incomplete, the script exits non-zero and the previously committed card is left
+untouched. What each number measures is documented in README.md next to this file.
 
 Usage:
     python3 scripts/activity/generate.py --login x1nboots --out assets
@@ -17,28 +18,52 @@ import sys
 import time
 import urllib.error
 import urllib.request
+import xml.etree.ElementTree as ET
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
 API = "https://api.github.com/graphql"
+MAX_PAGES = 50  # 100 items per page; a hard stop should a cursor never end
 
-QUERY = """
+CONTRIBUTIONS_QUERY = """
 query($login: String!) {
   user(login: $login) {
     contributionsCollection {
       totalCommitContributions
+      restrictedContributionsCount
       contributionCalendar {
         totalContributions
         weeks { contributionDays { date contributionCount } }
       }
     }
-    repositories(ownerAffiliations: OWNER, isFork: false, privacy: PUBLIC, first: 100) {
+  }
+}
+"""
+
+REPOSITORIES_QUERY = """
+query($login: String!, $after: String) {
+  user(login: $login) {
+    repositories(ownerAffiliations: OWNER, isFork: false, privacy: PUBLIC, first: 100, after: $after,
+                 orderBy: {field: NAME, direction: ASC}) {
+      pageInfo { hasNextPage endCursor }
       nodes {
-        name
-        languages(first: 20, orderBy: {field: SIZE, direction: DESC}) {
+        name isPrivate isFork isArchived isMirror
+        languages(first: 100, orderBy: {field: SIZE, direction: DESC}) {
+          pageInfo { hasNextPage endCursor }
           edges { size node { name } }
         }
       }
+    }
+  }
+}
+"""
+
+LANGUAGES_QUERY = """
+query($login: String!, $name: String!, $after: String) {
+  repository(owner: $login, name: $name) {
+    languages(first: 100, after: $after, orderBy: {field: SIZE, direction: DESC}) {
+      pageInfo { hasNextPage endCursor }
+      edges { size node { name } }
     }
   }
 }
@@ -55,49 +80,165 @@ PETAL = ("M0 0C-1.6 -1.2 -5.2 -4 -4.9 -7.2C-4.7 -9.4 -2.6 -10.4 -1 -9.9L0 -8.7L1
 MONTHS = "JAN FEB MAR APR MAY JUN JUL AUG SEP OCT NOV DEC".split()
 
 
+class DataError(Exception):
+    """The GitHub API failed, or answered with data the card cannot trust."""
+
+
 # ------------------------------------------------------------------ data
-def fetch(login, token, attempts=3):
-    body = json.dumps({"query": QUERY, "variables": {"login": login}}).encode()
+def graphql(token, query, variables, attempts=3):
+    body = json.dumps({"query": query, "variables": variables}).encode()
     for attempt in range(1, attempts + 1):
         req = urllib.request.Request(API, data=body, headers={
             "Authorization": f"bearer {token}",
             "Content-Type": "application/json",
-            "User-Agent": f"{login}-profile-activity-card",
+            "User-Agent": "profile-activity-card",
         })
         try:
             with urllib.request.urlopen(req, timeout=30) as resp:
                 payload = json.load(resp)
             break
-        except (urllib.error.URLError, TimeoutError) as err:
+        except urllib.error.HTTPError as err:
+            # 5xx and rate limits (403/429) can pass; bad credentials or queries will not
+            if (err.code < 500 and err.code not in (403, 429)) or attempt == attempts:
+                raise DataError(f"GitHub API request failed: HTTP {err.code} {err.reason}") from None
+        except (urllib.error.URLError, TimeoutError, ValueError) as err:
             if attempt == attempts:
-                raise SystemExit(f"GitHub API request failed: {err}")
-            time.sleep(2 ** attempt)
+                raise DataError(f"GitHub API request failed: {err}") from None
+        time.sleep(2 ** attempt)
+    if not isinstance(payload, dict):
+        raise DataError("GitHub API returned an unexpected response")
     if payload.get("errors"):
-        raise SystemExit(f"GitHub API returned errors: {payload['errors']}")
-    user = (payload.get("data") or {}).get("user")
-    if not user:
-        raise SystemExit(f"No public data returned for user {login!r}")
+        messages = "; ".join(str(e.get("message", e)) if isinstance(e, dict) else str(e) for e in payload["errors"])
+        raise DataError(f"GitHub API returned errors: {messages}")
+    return need(payload, "data")
+
+
+def need(obj, *path):
+    """obj[path[0]][path[1]]..., raising DataError if any step is missing or null."""
+    for key in path:
+        obj = obj.get(key) if isinstance(obj, dict) else None
+        if obj is None:
+            raise DataError(f"GitHub API response is missing {'.'.join(path)}")
+    return obj
+
+
+def pages(fetch_page):
+    """Yield every page of a GraphQL connection, following its cursor to the end."""
+    after = None
+    for _ in range(MAX_PAGES):
+        page = fetch_page(after)
+        yield page
+        info = need(page, "pageInfo")
+        if not info.get("hasNextPage"):
+            return
+        if not info.get("endCursor") or info["endCursor"] == after:
+            raise DataError("GitHub API pagination cursor did not advance")
+        after = info["endCursor"]
+    raise DataError(f"GitHub API returned more than {MAX_PAGES} pages")
+
+
+def fetch(login, token):
+    user = need(graphql(token, CONTRIBUTIONS_QUERY, {"login": login}), "user")
+
+    def repository_page(after):
+        data = graphql(token, REPOSITORIES_QUERY, {"login": login, "after": after})
+        return need(data, "user", "repositories")
+
+    def language_pages(name):
+        def page(after):
+            data = graphql(token, LANGUAGES_QUERY, {"login": login, "name": name, "after": after})
+            return need(data, "repository", "languages")
+        return pages(page)
+
+    repos = []
+    for page in pages(repository_page):
+        for repo in need(page, "nodes"):
+            if need(repo, "languages", "pageInfo").get("hasNextPage"):
+                repo["languages"] = {"edges": [e for p in language_pages(need(repo, "name")) for e in need(p, "edges")]}
+            repos.append(repo)
+    user["repositories"] = {"nodes": repos}
     return user
 
 
-def summarise(user, login):
-    collection = user["contributionsCollection"]
-    calendar = collection["contributionCalendar"]
-    weeks = [w["contributionDays"] for w in calendar["weeks"] if w["contributionDays"]]
-    days = [d for w in weeks for d in w]
+def calendar_days(calendar):
+    """[(date, count)] for every calendar day, oldest first, once the calendar is known to be whole.
 
-    longest = run = 0
-    for d in days:
-        run = run + 1 if d["contributionCount"] else 0
+    GitHub returns one unbroken run of days. Exact duplicates are ignored; conflicting
+    duplicates, gaps, or a total that disagrees with the days mean a partial response,
+    which is rejected rather than guessed at.
+    """
+    counts = {}
+    for week in need(calendar, "weeks"):
+        for day in need(week, "contributionDays"):
+            date = dt.date.fromisoformat(need(day, "date"))
+            n = need(day, "contributionCount")
+            if not isinstance(n, int) or n < 0:
+                raise DataError(f"invalid contribution count on {date}")
+            if counts.setdefault(date, n) != n:
+                raise DataError(f"conflicting contribution counts for {date}")
+    if not counts:
+        raise DataError("contribution calendar is empty")
+    first, last = min(counts), max(counts)
+    if len(counts) != (last - first).days + 1:
+        raise DataError(f"contribution calendar has gaps between {first} and {last}")
+    if need(calendar, "totalContributions") != sum(counts.values()):
+        raise DataError("contribution calendar total does not match its days")
+    return sorted(counts.items())
+
+
+def streaks(days):
+    """(current, longest) runs of consecutive active days in an unbroken [(date, count)] calendar.
+
+    The calendar's last day is today. Today does not break the current streak while
+    it has no contributions yet; the streak then counts back from yesterday.
+    """
+    longest = run = before_today = 0
+    for _, n in days:
+        before_today = run
+        run = run + 1 if n else 0
         longest = max(longest, run)
+    current = run if days[-1][1] else before_today
+    return current, longest
 
-    totals = {}
-    for repo in user["repositories"]["nodes"]:
-        if repo["name"].lower() == login.lower():
-            continue  # the profile repo only holds this card's tooling
-        for edge in repo["languages"]["edges"]:
-            name = edge["node"]["name"]
-            totals[name] = totals.get(name, 0) + edge["size"]
+
+def language_bytes(repos, login):
+    """Linguist byte totals per language, plus how many repositories were counted and skipped.
+
+    Only public repositories that are not forks, archived or mirrors count, and never
+    this profile repository. Private repositories are dropped here as well as in the
+    query, so a token that can see them still cannot put them on the public card.
+    """
+    totals, counted, skipped = {}, set(), {}
+    for repo in repos:
+        name = need(repo, "name").lower()
+        flags = zip(("private", "fork", "archived", "mirror"),
+                    (need(repo, k) for k in ("isPrivate", "isFork", "isArchived", "isMirror")))
+        reason = next((r for r, flag in flags if flag), "profile" if name == login.lower() else None)
+        if reason:
+            skipped[reason] = skipped.get(reason, 0) + 1
+            continue
+        if name in counted:
+            continue  # the same repository listed twice
+        counted.add(name)
+        sizes = {}
+        for edge in need(repo, "languages", "edges"):
+            if sizes.setdefault(need(edge, "node", "name"), need(edge, "size")) != edge["size"]:
+                raise DataError("conflicting language sizes within one repository")
+        for lang, size in sizes.items():
+            totals[lang] = totals.get(lang, 0) + size
+    return totals, len(counted), skipped
+
+
+def summarise(user, login):
+    collection = need(user, "contributionsCollection")
+    days = calendar_days(need(collection, "contributionCalendar"))
+    current, longest = streaks(days)
+
+    weeks = {}  # GitHub's calendar weeks run Sunday to Saturday
+    for date, n in days:
+        weeks.setdefault(date - dt.timedelta(days=(date.weekday() + 1) % 7), []).append((date, n))
+
+    totals, repos_counted, repos_skipped = language_bytes(need(user, "repositories", "nodes"), login)
     ranked = sorted(totals.items(), key=lambda kv: (-kv[1], kv[0]))
     grand = sum(totals.values())
     languages = [(name, size / grand) for name, size in ranked[:4]] if grand else []
@@ -106,14 +247,27 @@ def summarise(user, login):
         languages.append(("Other", rest / grand))
 
     return {
-        "total": calendar["totalContributions"],
-        "commits": collection["totalCommitContributions"],
-        "active_days": sum(1 for d in days if d["contributionCount"]),
+        "total": sum(n for _, n in days),
+        "private": need(collection, "restrictedContributionsCount"),
+        "commits": need(collection, "totalCommitContributions"),
+        "active_days": sum(1 for _, n in days if n),
+        "current_streak": current,
+        # a run reaching back to the first calendar day may have started before it
+        "current_streak_open": 0 < current == len(days) - (not days[-1][1]),
         "longest_streak": longest,
-        "weeks": [(dt.date.fromisoformat(w[0]["date"]), len(w), sum(d["contributionCount"] for d in w))
-                  for w in weeks],
+        "first_day": days[0][0],
+        "last_day": days[-1][0],
+        "weeks": [(w[0][0], len(w), sum(n for _, n in w)) for w in weeks.values()],
         "languages": languages,
+        "repos_counted": repos_counted,
+        "repos_skipped": repos_skipped,
     }
+
+
+def check_fresh(stats, today):
+    """Reject a calendar that does not end today, allowing a day either way for time zones."""
+    if abs((stats["last_day"] - today).days) > 1:
+        raise DataError(f"contribution calendar ends {stats['last_day']}, expected {today}")
 
 
 # ------------------------------------------------------------------ type
@@ -281,11 +435,17 @@ def languages(t, langs, x0, x1, y, row, name_size, bar_gap):
     return "".join(out)
 
 
+def day_count(n):
+    return f"{n:,} day" if n == 1 else f"{n:,} days"
+
+
 def describe(s):
     langs = ", ".join(f"{n} {share_label(v)}" for n, v in s["languages"]) or "none yet"
-    return (f"{s['total']:,} contributions in the past year across {s['active_days']} active days; "
-            f"longest streak {s['longest_streak']} days; {s['commits']:,} commits. "
-            f"Languages by code volume in public repositories: {langs}.")
+    private = f" (including {s['private']:,} private, as counts only)" if s["private"] else ""
+    current = ("at least " if s["current_streak_open"] else "") + day_count(s["current_streak"])
+    return (f"{s['total']:,} contributions{private} in the past year on {day_count(s['active_days'])}; "
+            f"current streak {current}; longest streak {day_count(s['longest_streak'])}; {s['commits']:,} commits. "
+            f"Languages by code size in public repositories: {langs}.")
 
 
 def render(s, glyphs, mobile=False):
@@ -299,7 +459,7 @@ def render(s, glyphs, mobile=False):
                         (s["active_days"], None, "ACTIVE DAYS", 48, 13),
                         (s["longest_streak"], streak_unit, "LONGEST STREAK", 48, 13),
                         (s["commits"], None, "COMMITS", 48, 13)], 56, 830, 166, 34, 36),
-            kicker(t, "LANGUAGES", 880, 78, 13.5),
+            kicker(t, "LANGUAGES · PUBLIC", 880, 78, 13.5),
             languages(t, s["languages"], 880, 1144, 112, 27, 12.5, 9),
             kicker(t, "CONTRIBUTIONS PER WEEK", 56, 268, 13.5, rule_to=1144),
             timeline(t, s["weeks"], 64, 1136, 406, 96, 6, 12, 30),
@@ -315,7 +475,7 @@ def render(s, glyphs, mobile=False):
                         (s["commits"], None, "COMMITS", 64, 16)], 52, 668, 392, 40, 28),
             kicker(t, "CONTRIBUTIONS PER WEEK", 52, 510, 19, rule_to=668),
             timeline(t, s["weeks"], 60, 660, 720, 140, 5.2, 16, 40, month_every=2),
-            kicker(t, "LANGUAGES", 52, 840, 19, rule_to=668),
+            kicker(t, "LANGUAGES · PUBLIC", 52, 840, 19, rule_to=668),
             languages(t, s["languages"], 52, 668, 892, 48, 17, 14),
         ]
     content = "".join(body)
@@ -327,33 +487,57 @@ def render(s, glyphs, mobile=False):
     )
 
 
+def validate(svg):
+    """Raise DataError unless the SVG is well-formed and every <use> points at a defined id."""
+    try:
+        root = ET.fromstring(svg)
+    except ET.ParseError as err:
+        raise DataError(f"generated SVG is not well-formed: {err}") from None
+    ids = {el.get("id") for el in root.iter()}
+    refs = {el.get("href")[1:] for el in root.iter() if (el.get("href") or "").startswith("#")}
+    if refs - ids:
+        raise DataError(f"generated SVG references undefined ids: {sorted(refs - ids)}")
+
+
 def write(path, text):
     tmp = path.with_suffix(".tmp")
     tmp.write_text(text, encoding="utf-8")
     os.replace(tmp, path)
 
 
-def main():
+def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("--login", required=True)
     ap.add_argument("--out", default="assets", type=Path)
     ap.add_argument("--from-json", type=Path, help="render from a saved API response instead of fetching")
-    args = ap.parse_args()
+    args = ap.parse_args(argv)
 
-    if args.from_json:
-        user = json.loads(args.from_json.read_text())
-    else:
-        token = os.environ.get("ACTIVITY_TOKEN") or os.environ.get("GITHUB_TOKEN")
-        if not token:
-            raise SystemExit("Set GITHUB_TOKEN (or ACTIVITY_TOKEN) to query the GitHub API.")
-        user = fetch(args.login, token)
+    try:
+        if args.from_json:
+            user = json.loads(args.from_json.read_text())
+        else:
+            token = os.environ.get("ACTIVITY_TOKEN") or os.environ.get("GITHUB_TOKEN")
+            if not token:
+                raise SystemExit("Set GITHUB_TOKEN (or ACTIVITY_TOKEN) to query the GitHub API.")
+            user = fetch(args.login, token)
+        stats = summarise(user, args.login)
+        if not args.from_json:
+            check_fresh(stats, dt.datetime.now(dt.timezone.utc).date())
+        glyphs = HERE / "glyphs.json"
+        cards = {"activity.svg": render(stats, glyphs), "activity-mobile.svg": render(stats, glyphs, mobile=True)}
+        for svg in cards.values():
+            validate(svg)
+    except DataError as err:
+        raise SystemExit(f"Activity card not updated: {err}")
 
-    stats = summarise(user, args.login)
-    glyphs = HERE / "glyphs.json"
     args.out.mkdir(parents=True, exist_ok=True)
-    write(args.out / "activity.svg", render(stats, glyphs))
-    write(args.out / "activity-mobile.svg", render(stats, glyphs, mobile=True))
+    for name, svg in cards.items():
+        write(args.out / name, svg)
     print(describe(stats))
+    skipped = ", ".join(f"{n} {reason}" for reason, n in sorted(stats["repos_skipped"].items())) or "none"
+    print(f"Calendar {stats['first_day']} to {stats['last_day']} as dated by GitHub for this token. "
+          f"Languages from {stats['repos_counted']} public repositor{'y' if stats['repos_counted'] == 1 else 'ies'}; "
+          f"skipped: {skipped}.")
 
 
 if __name__ == "__main__":

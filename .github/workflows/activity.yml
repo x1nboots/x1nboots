@@ -2,7 +2,9 @@ name: Activity card
 
 # Re-renders assets/activity*.svg from public GitHub data and commits the
 # result only when it changed. Uses the built-in GITHUB_TOKEN; no third-party
-# services or packages are involved.
+# services or packages are involved. If the API fails or returns incomplete
+# data, the render step fails the run and the committed card stays as it was.
+# What each number measures: scripts/activity/README.md.
 
 on:
   schedule:
@@ -28,6 +30,9 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
+      - name: Test generator
+        run: python3 -m unittest discover -s scripts/activity
+
       - name: Render activity card
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -44,5 +49,7 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git commit -m "Refresh activity card"
-          git pull --rebase --quiet
+          # A queued run may have refreshed the card since this checkout; this
+          # render is the newer one, so it wins any conflict on the two SVGs.
+          git pull --rebase --quiet -X theirs
           git push
