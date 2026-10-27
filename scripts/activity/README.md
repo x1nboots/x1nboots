@@ -4,8 +4,9 @@
 GitHub GraphQL API. `.github/workflows/activity.yml` runs it daily (04:23 UTC; GitHub
 often starts scheduled runs later) with the built-in `GITHUB_TOKEN`, on every push that
 changes this folder or the workflow, and on manual dispatch. It uses only the Python
-standard library. An `ACTIVITY_TOKEN` environment variable, if set, takes precedence
-over `GITHUB_TOKEN`. The workflow does not set one.
+standard library and makes a single GraphQL request for the contribution calendar.
+An `ACTIVITY_TOKEN` environment variable, if set, takes precedence over
+`GITHUB_TOKEN`. The workflow does not set one.
 
 ```sh
 python3 -m unittest discover -s scripts/activity -v               # tests
@@ -14,19 +15,23 @@ python3 scripts/activity/generate.py --login x1nboots --out /tmp/card --from-jso
 
 ## What the card measures
 
-Every figure covers GitHub's contribution calendar for the past year: the 52 full weeks
-plus the current one that GitHub returns by default, the same window as "contributions
-in the last year" on the profile.
+Every figure comes from GitHub's contribution calendar for the past year: the 52 full
+weeks plus the current one that GitHub returns by default, the same window as
+"contributions in the last year" on the profile.
 
-| Figure | Source |
-| --- | --- |
-| Contributions | `contributionCalendar.totalContributions`, checked against the sum of its days |
-| Active days | Calendar days with at least one contribution |
-| Longest streak | Longest run of consecutive active days inside the window |
-| Current streak | Shown in the SVG description and the run log; see below |
-| Commits | `totalCommitContributions` |
-| Contributions per week | Sum of each Sunday-to-Saturday calendar week |
-| Languages · public | Share of code size, see below |
+| Section | Figure | Source |
+| --- | --- | --- |
+| The past year | Contributions | `contributionCalendar.totalContributions`, checked against the sum of its days |
+| | Active days | Calendar days with at least one contribution |
+| | Longest streak | Longest run of consecutive active days inside the window |
+| | Current streak | Shown in the SVG description and the run log; see below |
+| | Commits | `totalCommitContributions` |
+| Last 30 days | Contributions | Sum of the last 30 calendar days, see below |
+| | Active days | Days among those 30 with at least one contribution |
+| Contributions per week | | Sum of each Sunday-to-Saturday calendar week |
+
+Programming languages are presented in the profile's Tech & Tools section and are not
+measured by this card.
 
 GitHub decides which contributions count. Commits count only when they are on a
 repository's default branch and authored with an email address linked to the account.
@@ -51,29 +56,29 @@ so they never count as the owner's activity.
 - Leap days and year boundaries need no special handling, because days are compared as
   real dates.
 
-## Languages
+## Last 30 days
 
-The bars show each language's share of the bytes GitHub Linguist detected across the
-owner's public repositories. GitHub's language data already leaves out vendored,
-generated and documentation files, and honours `linguist-*` overrides in
-`.gitattributes`. Forks, archived repositories, mirrors and this profile repository are
-skipped. Bytes measure how much code exists, not time spent writing it. A large
-repository outweighs many small ones.
+- The window is the calendar's last day ("today", as for streaks) and the 29 days before
+  it: exactly 30 calendar days, today included. Today counts even though it is not over;
+  contributions made later in the day appear at the next run.
+- It uses the same validated calendar and day boundaries as every other figure. No
+  extra request is made.
+- Month ends, year ends and February 29 need no special handling, because days are
+  counted as real dates. For example, a window ending on 1 March 2028 starts on
+  1 February, while one ending on 1 March 2027 starts on 31 January.
+- A calendar covering fewer than 30 days is incomplete, so the run fails instead of
+  showing a figure for a shorter period.
 
 ## What the card cannot see
 
-- **Private contributions.** GitHub only exposes them, as anonymous daily counts, when
-  *Settings → Public profile → Contributions & activity → Include private
-  contributions on my profile* is on. When it is, the calendar figures include them
-  and the description says how many there are. Repository names are never shown.
-  Because other viewers get private activity only as an undifferentiated count
-  (`restrictedContributionsCount`), the Commits figure should stay public-only.
-- **Private repositories' languages.** `GITHUB_TOKEN` can only read this repository, so
-  language data covers public repositories alone. Private repositories are filtered out
-  in the query *and* again in code, so even a broader token cannot put them on the
-  public card. Including them would need a separate fine-grained token with read-only
-  *Metadata* access to those repositories, stored as a secret. That is a deliberate
-  privacy trade-off, and it is not set up.
+**Private contributions are included only when GitHub exposes them.** GitHub shows
+them, as anonymous daily counts, only while *Settings → Public profile → Contributions
+& activity → Include private contributions on my profile* is on. When it is, every
+calendar-based figure includes them: both contribution counts, both active-day counts,
+the streaks and the weekly chart. The description then says how many there are.
+Repository names and details are never available, and never shown. The Commits figure
+stays public-only, because other viewers get private activity only as an
+undifferentiated count (`restrictedContributionsCount`).
 
 ## Failure behaviour
 
@@ -84,7 +89,7 @@ The run fails, and the committed card stays as it was, when:
 - the API returns GraphQL errors or missing fields;
 - the calendar has gaps, conflicting duplicate days, or a total that disagrees with
   its days;
-- pagination does not advance;
+- the calendar covers fewer than 30 days;
 - the calendar does not end within a day of the runner's UTC date, which indicates
   stale data;
 - the rendered SVG is not well-formed;
@@ -95,7 +100,7 @@ commit.
 
 ## Why the card can look unchanged
 
-- Activity in private repositories does not appear (see above).
+- Private activity appears only while the profile setting above is on.
 - GitHub serves the SVG with `Cache-Control: max-age=300`, so a refresh can take about
   five minutes to show. A browser may cache it longer.
 - A run that found nothing new logs "Activity card unchanged." and commits nothing.

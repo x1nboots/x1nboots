@@ -23,7 +23,7 @@ from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
 API = "https://api.github.com/graphql"
-MAX_PAGES = 50  # 100 items per page; a hard stop should a cursor never end
+RECENT_DAYS = 30
 
 CONTRIBUTIONS_QUERY = """
 query($login: String!) {
@@ -35,35 +35,6 @@ query($login: String!) {
         totalContributions
         weeks { contributionDays { date contributionCount } }
       }
-    }
-  }
-}
-"""
-
-REPOSITORIES_QUERY = """
-query($login: String!, $after: String) {
-  user(login: $login) {
-    repositories(ownerAffiliations: OWNER, isFork: false, privacy: PUBLIC, first: 100, after: $after,
-                 orderBy: {field: NAME, direction: ASC}) {
-      pageInfo { hasNextPage endCursor }
-      nodes {
-        name isPrivate isFork isArchived isMirror
-        languages(first: 100, orderBy: {field: SIZE, direction: DESC}) {
-          pageInfo { hasNextPage endCursor }
-          edges { size node { name } }
-        }
-      }
-    }
-  }
-}
-"""
-
-LANGUAGES_QUERY = """
-query($login: String!, $name: String!, $after: String) {
-  repository(owner: $login, name: $name) {
-    languages(first: 100, after: $after, orderBy: {field: SIZE, direction: DESC}) {
-      pageInfo { hasNextPage endCursor }
-      edges { size node { name } }
     }
   }
 }
@@ -122,42 +93,8 @@ def need(obj, *path):
     return obj
 
 
-def pages(fetch_page):
-    """Yield every page of a GraphQL connection, following its cursor to the end."""
-    after = None
-    for _ in range(MAX_PAGES):
-        page = fetch_page(after)
-        yield page
-        info = need(page, "pageInfo")
-        if not info.get("hasNextPage"):
-            return
-        if not info.get("endCursor") or info["endCursor"] == after:
-            raise DataError("GitHub API pagination cursor did not advance")
-        after = info["endCursor"]
-    raise DataError(f"GitHub API returned more than {MAX_PAGES} pages")
-
-
 def fetch(login, token):
-    user = need(graphql(token, CONTRIBUTIONS_QUERY, {"login": login}), "user")
-
-    def repository_page(after):
-        data = graphql(token, REPOSITORIES_QUERY, {"login": login, "after": after})
-        return need(data, "user", "repositories")
-
-    def language_pages(name):
-        def page(after):
-            data = graphql(token, LANGUAGES_QUERY, {"login": login, "name": name, "after": after})
-            return need(data, "repository", "languages")
-        return pages(page)
-
-    repos = []
-    for page in pages(repository_page):
-        for repo in need(page, "nodes"):
-            if need(repo, "languages", "pageInfo").get("hasNextPage"):
-                repo["languages"] = {"edges": [e for p in language_pages(need(repo, "name")) for e in need(p, "edges")]}
-            repos.append(repo)
-    user["repositories"] = {"nodes": repos}
-    return user
+    return need(graphql(token, CONTRIBUTIONS_QUERY, {"login": login}), "user")
 
 
 def calendar_days(calendar):
@@ -201,50 +138,23 @@ def streaks(days):
     return current, longest
 
 
-def language_bytes(repos, login):
-    """Linguist byte totals per language, plus how many repositories were counted and skipped.
-
-    Only public repositories that are not forks, archived or mirrors count, and never
-    this profile repository. Private repositories are dropped here as well as in the
-    query, so a token that can see them still cannot put them on the public card.
-    """
-    totals, counted, skipped = {}, set(), {}
-    for repo in repos:
-        name = need(repo, "name").lower()
-        flags = zip(("private", "fork", "archived", "mirror"),
-                    (need(repo, k) for k in ("isPrivate", "isFork", "isArchived", "isMirror")))
-        reason = next((r for r, flag in flags if flag), "profile" if name == login.lower() else None)
-        if reason:
-            skipped[reason] = skipped.get(reason, 0) + 1
-            continue
-        if name in counted:
-            continue  # the same repository listed twice
-        counted.add(name)
-        sizes = {}
-        for edge in need(repo, "languages", "edges"):
-            if sizes.setdefault(need(edge, "node", "name"), need(edge, "size")) != edge["size"]:
-                raise DataError("conflicting language sizes within one repository")
-        for lang, size in sizes.items():
-            totals[lang] = totals.get(lang, 0) + size
-    return totals, len(counted), skipped
+def recent(days, n=RECENT_DAYS):
+    """(contributions, active days, first day) over the calendar's last n days, today included."""
+    if len(days) < n:
+        raise DataError(f"contribution calendar covers {len(days)} days, fewer than {n}")
+    window = days[-n:]
+    return sum(c for _, c in window), sum(1 for _, c in window if c), window[0][0]
 
 
-def summarise(user, login):
+def summarise(user):
     collection = need(user, "contributionsCollection")
     days = calendar_days(need(collection, "contributionCalendar"))
     current, longest = streaks(days)
+    recent_total, recent_active, recent_first = recent(days)
 
     weeks = {}  # GitHub's calendar weeks run Sunday to Saturday
     for date, n in days:
         weeks.setdefault(date - dt.timedelta(days=(date.weekday() + 1) % 7), []).append((date, n))
-
-    totals, repos_counted, repos_skipped = language_bytes(need(user, "repositories", "nodes"), login)
-    ranked = sorted(totals.items(), key=lambda kv: (-kv[1], kv[0]))
-    grand = sum(totals.values())
-    languages = [(name, size / grand) for name, size in ranked[:4]] if grand else []
-    rest = sum(size for _, size in ranked[4:])
-    if rest:
-        languages.append(("Other", rest / grand))
 
     return {
         "total": sum(n for _, n in days),
@@ -258,9 +168,9 @@ def summarise(user, login):
         "first_day": days[0][0],
         "last_day": days[-1][0],
         "weeks": [(w[0][0], len(w), sum(n for _, n in w)) for w in weeks.values()],
-        "languages": languages,
-        "repos_counted": repos_counted,
-        "repos_skipped": repos_skipped,
+        "recent_total": recent_total,
+        "recent_active": recent_active,
+        "recent_first": recent_first,
     }
 
 
@@ -377,10 +287,6 @@ def figures(t, items, x0, x1, y, label_gap, min_gap):
     return "".join(out)
 
 
-def share_label(share):
-    return "<1%" if share < 0.005 else f"{round(share * 100)}%"
-
-
 def timeline(t, weeks, x0, x1, base, height, marker, label_size, label_gap, month_every=1):
     """One lollipop per week: stem height = contributions that week."""
     peak = max((c for _, _, c in weeks), default=0)
@@ -419,38 +325,24 @@ def timeline(t, weeks, x0, x1, base, height, marker, label_size, label_gap, mont
     return "".join(out)
 
 
-def languages(t, langs, x0, x1, y, row, name_size, bar_gap):
-    if not langs:
-        return t.run("NO PUBLIC CODE YET", "medium", name_size, x0, y, INK_3, tracking=0.24)
-    out = []
-    for i, (name, share) in enumerate(langs):
-        ry = y + i * row
-        pct = share_label(share)
-        out.append(t.run(name, "medium", name_size, x0, ry, INK_2, tracking=0.2))
-        out.append(t.run(pct, "medium", name_size, x1, ry, INK, tracking=0.1, anchor="end"))
-        out.append(f'<rect x="{fmt(x0)}" y="{fmt(ry + bar_gap)}" width="{fmt(x1 - x0)}" height="3" rx="1.5" '
-                   f'fill="{SAKURA}" fill-opacity=".14"/>')
-        out.append(f'<rect x="{fmt(x0)}" y="{fmt(ry + bar_gap)}" width="{fmt(max((x1 - x0) * share, 3))}" '
-                   f'height="3" rx="1.5" fill="{SAKURA}"/>')
-    return "".join(out)
-
-
-def day_count(n):
-    return f"{n:,} day" if n == 1 else f"{n:,} days"
+def plural(n, word):
+    return f"{n:,} {word}" if n == 1 else f"{n:,} {word}s"
 
 
 def describe(s):
-    langs = ", ".join(f"{n} {share_label(v)}" for n, v in s["languages"]) or "none yet"
     private = f" (including {s['private']:,} private, as counts only)" if s["private"] else ""
-    current = ("at least " if s["current_streak_open"] else "") + day_count(s["current_streak"])
-    return (f"{s['total']:,} contributions{private} in the past year on {day_count(s['active_days'])}; "
-            f"current streak {current}; longest streak {day_count(s['longest_streak'])}; {s['commits']:,} commits. "
-            f"Languages by code size in public repositories: {langs}.")
+    current = ("at least " if s["current_streak_open"] else "") + plural(s["current_streak"], "day")
+    return (f"{plural(s['total'], 'contribution')}{private} in the past year on {plural(s['active_days'], 'day')}; "
+            f"current streak {current}; longest streak {plural(s['longest_streak'], 'day')}; "
+            f"{plural(s['commits'], 'commit')}. Last {RECENT_DAYS} days, today included: "
+            f"{plural(s['recent_total'], 'contribution')} on {plural(s['recent_active'], 'day')}. "
+            f"Private contributions count only when GitHub shows them on the public profile.")
 
 
 def render(s, glyphs, mobile=False):
     t = Type(glyphs)
     streak_unit = "DAY" if s["longest_streak"] == 1 else "DAYS"
+    recent_kicker = f"LAST {RECENT_DAYS} DAYS"
     if not mobile:
         w, h, rx = 1200, 470, 20
         body = [
@@ -458,15 +350,17 @@ def render(s, glyphs, mobile=False):
             figures(t, [(s["total"], None, "CONTRIBUTIONS", 84, 13),
                         (s["active_days"], None, "ACTIVE DAYS", 48, 13),
                         (s["longest_streak"], streak_unit, "LONGEST STREAK", 48, 13),
-                        (s["commits"], None, "COMMITS", 48, 13)], 56, 830, 166, 34, 36),
-            kicker(t, "LANGUAGES · PUBLIC", 880, 78, 13.5),
-            languages(t, s["languages"], 880, 1144, 112, 27, 12.5, 9),
+                        (s["commits"], None, "COMMITS", 48, 13)], 56, 790, 166, 34, 36),
+            # a hairline in the border's colour sets the 30-day figures apart from the year's
+            f'<rect x="822" y="64" width="1" height="142" fill="{SAKURA}" fill-opacity=".16"/>',
+            kicker(t, recent_kicker, 854, 78, 13.5),
+            figures(t, [(s["recent_total"], None, "CONTRIBUTIONS", 48, 13),
+                        (s["recent_active"], None, "ACTIVE DAYS", 48, 13)], 854, 1144, 166, 34, 36),
             kicker(t, "CONTRIBUTIONS PER WEEK", 56, 268, 13.5, rule_to=1144),
             timeline(t, s["weeks"], 64, 1136, 406, 96, 6, 12, 30),
         ]
     else:
-        w, rx = 720, 24
-        h = 892 + max(len(s["languages"]) - 1, 0) * 48 + 72
+        w, h, rx = 720, 1044, 24
         body = [
             kicker(t, "THE PAST YEAR", 52, 92, 19, rule_to=668),
             figure(t, s["total"], None, "CONTRIBUTIONS", 52, 236, 128, 18, 46),
@@ -475,8 +369,9 @@ def render(s, glyphs, mobile=False):
                         (s["commits"], None, "COMMITS", 64, 16)], 52, 668, 392, 40, 28),
             kicker(t, "CONTRIBUTIONS PER WEEK", 52, 510, 19, rule_to=668),
             timeline(t, s["weeks"], 60, 660, 720, 140, 5.2, 16, 40, month_every=2),
-            kicker(t, "LANGUAGES · PUBLIC", 52, 840, 19, rule_to=668),
-            languages(t, s["languages"], 52, 668, 892, 48, 17, 14),
+            kicker(t, recent_kicker, 52, 840, 19, rule_to=668),
+            figures(t, [(s["recent_total"], None, "CONTRIBUTIONS", 64, 16),
+                        (s["recent_active"], None, "ACTIVE DAYS", 64, 16)], 52, 668, 936, 40, 28),
         ]
     content = "".join(body)
     return (
@@ -520,7 +415,7 @@ def main(argv=None):
             if not token:
                 raise SystemExit("Set GITHUB_TOKEN (or ACTIVITY_TOKEN) to query the GitHub API.")
             user = fetch(args.login, token)
-        stats = summarise(user, args.login)
+        stats = summarise(user)
         if not args.from_json:
             check_fresh(stats, dt.datetime.now(dt.timezone.utc).date())
         glyphs = HERE / "glyphs.json"
@@ -534,10 +429,8 @@ def main(argv=None):
     for name, svg in cards.items():
         write(args.out / name, svg)
     print(describe(stats))
-    skipped = ", ".join(f"{n} {reason}" for reason, n in sorted(stats["repos_skipped"].items())) or "none"
-    print(f"Calendar {stats['first_day']} to {stats['last_day']} as dated by GitHub for this token. "
-          f"Languages from {stats['repos_counted']} public repositor{'y' if stats['repos_counted'] == 1 else 'ies'}; "
-          f"skipped: {skipped}.")
+    print(f"Calendar {stats['first_day']} to {stats['last_day']} as dated by GitHub for this token; "
+          f"last {RECENT_DAYS} days from {stats['recent_first']}.")
 
 
 if __name__ == "__main__":

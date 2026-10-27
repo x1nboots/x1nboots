@@ -29,272 +29,285 @@ def calendar(start, counts):
     return {"totalContributions": sum(counts), "weeks": weeks}
 
 
-def repo(name, langs, private=False, fork=False, archived=False, mirror=False):
-    return {"name": name, "isPrivate": private, "isFork": fork, "isArchived": archived, "isMirror": mirror,
-            "languages": {"pageInfo": {"hasNextPage": False, "endCursor": None},
-                          "edges": [{"size": s, "node": {"name": n}} for n, s in langs.items()]}}
-
-
-def user(counts, repos=(), start=dt.date(2025, 10, 26), commits=None, restricted=0):
-    cal = calendar(start, counts)
+def user(counts, start=dt.date(2025, 10, 26), commits=None, restricted=0):
     return {
         "contributionsCollection": {
-            "startedAt": f"{start.isoformat()}T00:00:00Z",
-            "endedAt": f"{(start + dt.timedelta(days=len(counts) - 1)).isoformat()}T23:59:59Z",
             "totalCommitContributions": sum(counts) if commits is None else commits,
             "restrictedContributionsCount": restricted,
-            "contributionCalendar": cal,
+            "contributionCalendar": calendar(start, counts),
         },
-        "repositories": {"nodes": list(repos)},
     }
 
 
-def stats(counts, repos=(), **kw):
-    return g.summarise(user(counts, repos, **kw), LOGIN)
+def user_ending(last, active, length=371):
+    """A calendar of about a year that ends on `last`, with {date: count} contributions."""
+    start = last - dt.timedelta(days=length - 1)
+    start -= dt.timedelta(days=(start.weekday() + 1) % 7)  # back to a Sunday, as GitHub starts
+    counts = [active.get(start + dt.timedelta(days=i), 0) for i in range((last - start).days + 1)]
+    return user(counts, start=start)
+
+
+def days(counts, start=dt.date(2025, 10, 26)):
+    return [(start + dt.timedelta(days=i), n) for i, n in enumerate(counts)]
+
+
+def stats(counts, **kw):
+    return g.summarise(user(counts, **kw))
+
+
+def calendar_days_of(u):
+    return u["contributionsCollection"]["contributionCalendar"]["weeks"][0]["contributionDays"]
 
 
 class Characterisation(unittest.TestCase):
-    """Behaviour of the original generator that must survive the fixes."""
+    """Behaviour of the earlier generator that must survive the changes."""
 
     def test_totals_active_days_and_longest_streak(self):
         counts = [0] * 367
         for i in (10, 11, 12, 40, 41, 300):
             counts[i] = 2
-        s = g.summarise(user(counts, commits=9), LOGIN)
+        s = g.summarise(user(counts, commits=9))
         self.assertEqual((s["total"], s["commits"], s["active_days"], s["longest_streak"]), (12, 9, 6, 3))
 
     def test_weeks_follow_github_calendar_weeks(self):
-        counts = [1] * 10
-        s = g.summarise(user(counts), LOGIN)
-        self.assertEqual(s["weeks"], [(dt.date(2025, 10, 26), 7, 7), (dt.date(2025, 11, 2), 3, 3)])
-
-    def test_language_shares_top_four_plus_other(self):
-        repos = [repo("a", {"Python": 600, "CSS": 50}), repo("b", {"Java": 200, "Go": 100, "C": 30, "Lua": 20}),
-                 repo(LOGIN, {"Python": 10_000})]
-        s = g.summarise(user([0] * 7, repos), LOGIN)
-        names = [n for n, _ in s["languages"]]
-        self.assertEqual(names, ["Python", "Java", "Go", "CSS", "Other"])
-        self.assertAlmostEqual(sum(v for _, v in s["languages"]), 1.0)
-        self.assertAlmostEqual(dict(s["languages"])["Python"], 0.6)
+        s = stats([1] * 31)
+        self.assertEqual(len(s["weeks"]), 5)
+        self.assertEqual(s["weeks"][0], (dt.date(2025, 10, 26), 7, 7))
+        self.assertEqual(s["weeks"][-1], (dt.date(2025, 11, 23), 3, 3))
 
     def test_render_keeps_card_dimensions(self):
-        s = g.summarise(user([1] * 30, [repo("a", {"Java": 1})]), LOGIN)
+        s = stats([1] * 30)
         self.assertIn('viewBox="0 0 1200 470"', g.render(s, GLYPHS))
-        self.assertIn('viewBox="0 0 720 964"', g.render(s, GLYPHS, mobile=True))
+        self.assertIn('viewBox="0 0 720 1044"', g.render(s, GLYPHS, mobile=True))
 
     def test_render_is_deterministic(self):
-        s = g.summarise(user([0, 3, 1] * 100, [repo("a", {"Java": 5, "Python": 3})]), LOGIN)
+        s = stats([0, 3, 1] * 100)
         self.assertEqual(g.render(s, GLYPHS), g.render(s, GLYPHS))
 
 
 class Streaks(unittest.TestCase):
-    def streaks(self, counts, start=dt.date(2025, 10, 26)):
-        s = stats(counts, start=start)
-        return s["current_streak"], s["longest_streak"]
-
     def test_active_today_counts(self):
-        self.assertEqual(self.streaks([0, 0, 1, 1]), (2, 2))
+        self.assertEqual(g.streaks(days([0, 0, 1, 1])), (2, 2))
 
     def test_no_contribution_today_keeps_yesterdays_streak(self):
-        self.assertEqual(self.streaks([0, 1, 1, 1, 0]), (3, 3))
+        self.assertEqual(g.streaks(days([0, 1, 1, 1, 0])), (3, 3))
 
     def test_no_contribution_today_or_yesterday_is_zero(self):
-        self.assertEqual(self.streaks([1, 1, 1, 0, 0]), (0, 3))
+        self.assertEqual(g.streaks(days([1, 1, 1, 0, 0])), (0, 3))
 
     def test_across_midnight(self):
         # Contributions late on Mon Oct 27 and early on Tue Oct 28 fall on consecutive calendar days.
         week = [0] * 7
         week[1], week[2] = 3, 1  # calendar starts Sun Oct 26
-        self.assertEqual(self.streaks(week[:3]), (2, 2))
+        self.assertEqual(g.streaks(days(week[:3])), (2, 2))
         # The next run sees Wednesday, still empty: the streak survives until Wednesday is over ...
-        self.assertEqual(self.streaks(week[:4]), (2, 2))
+        self.assertEqual(g.streaks(days(week[:4])), (2, 2))
         # ... and is gone once Thursday is today.
-        self.assertEqual(self.streaks(week[:5]), (0, 2))
+        self.assertEqual(g.streaks(days(week[:5])), (0, 2))
 
     def test_broken_streak(self):
-        self.assertEqual(self.streaks([1, 1, 1, 0, 1, 1]), (2, 3))
-        self.assertEqual(self.streaks([1, 1, 0, 1, 1, 1, 1, 0, 1]), (1, 4))
+        self.assertEqual(g.streaks(days([1, 1, 1, 0, 1, 1])), (2, 3))
+        self.assertEqual(g.streaks(days([1, 1, 0, 1, 1, 1, 1, 0, 1])), (1, 4))
 
     def test_year_boundary(self):
         # Sun Dec 28 2025 .. Fri Jan 2 2026
-        s = stats([0, 0, 1, 2, 3, 1], start=dt.date(2025, 12, 28))
+        self.assertEqual(g.streaks(days([0, 0, 1, 2, 3, 1], start=dt.date(2025, 12, 28))), (4, 4))
+        s = g.summarise(user_ending(dt.date(2026, 1, 2), {dt.date(2025, 12, 30): 1, dt.date(2025, 12, 31): 2,
+                                                          dt.date(2026, 1, 1): 3, dt.date(2026, 1, 2): 1}))
         self.assertEqual((s["current_streak"], s["longest_streak"], s["active_days"]), (4, 4, 4))
-        self.assertEqual([w[0] for w in s["weeks"]], [dt.date(2025, 12, 28)])
+        self.assertEqual(s["weeks"][-1], (dt.date(2025, 12, 28), 6, 7))
 
     def test_leap_day(self):
         # Sun Feb 27 2028 .. Wed Mar 1 2028 passes through Feb 29.
-        self.assertEqual(self.streaks([0, 1, 1, 1], start=dt.date(2028, 2, 27)), (3, 3))
+        self.assertEqual(g.streaks(days([0, 1, 1, 1], start=dt.date(2028, 2, 27))), (3, 3))
         # Sun Dec 26 2027 .. Sat Dec 30 2028: every day of leap year 2028 is one unbroken run.
         s = stats([1] * 371, start=dt.date(2027, 12, 26))
         self.assertEqual(s["longest_streak"], 371)
 
     def test_non_leap_february_is_contiguous(self):
         # Sun Feb 28 2027 -> Mon Mar 1 2027
-        self.assertEqual(self.streaks([1, 1], start=dt.date(2027, 2, 28)), (2, 2))
+        self.assertEqual(g.streaks(days([1, 1], start=dt.date(2027, 2, 28))), (2, 2))
 
     def test_streak_reaching_window_start_is_marked_open(self):
-        s = stats([1] * 10)
+        s = stats([1] * 30)
         self.assertTrue(s["current_streak_open"])
-        self.assertIn("current streak at least 10 days", g.describe(s))
-        s = stats([1] * 9 + [0])
-        self.assertTrue(s["current_streak_open"])
-        self.assertFalse(stats([0] + [1] * 9)["current_streak_open"])
-        self.assertFalse(stats([0] * 10)["current_streak_open"])
+        self.assertIn("current streak at least 30 days", g.describe(s))
+        self.assertTrue(stats([1] * 29 + [0])["current_streak_open"])
+        self.assertFalse(stats([0] + [1] * 29)["current_streak_open"])
+        self.assertFalse(stats([0] * 30)["current_streak_open"])
 
     def test_empty_activity(self):
         s = stats([0] * 367)
         self.assertEqual((s["total"], s["active_days"], s["current_streak"], s["longest_streak"]), (0, 0, 0, 0))
-        self.assertEqual(s["languages"], [])
         self.assertIn("current streak 0 days; longest streak 0 days", g.describe(s))
         for mobile in (False, True):
             g.validate(g.render(s, GLYPHS, mobile=mobile))
 
 
+class RecentWindow(unittest.TestCase):
+    """The LAST 30 DAYS figures: today and the 29 calendar days before it."""
+
+    TODAY = dt.date(2026, 10, 27)
+
+    def recent(self, active, today=TODAY):
+        s = g.summarise(user_ending(today, active))
+        return s["recent_total"], s["recent_active"], s["recent_first"]
+
+    def test_window_is_today_and_the_29_days_before(self):
+        first = self.TODAY - dt.timedelta(days=29)
+        active = {self.TODAY: 1, first: 2, first - dt.timedelta(days=1): 50}
+        self.assertEqual(self.recent(active), (3, 2, first))
+
+    def test_today_without_contributions_is_still_in_the_window(self):
+        yesterday = self.TODAY - dt.timedelta(days=1)
+        self.assertEqual(self.recent({yesterday: 4}), (4, 1, dt.date(2026, 9, 28)))
+
+    def test_window_rolls_forward_one_day_per_calendar_day(self):
+        oldest = self.TODAY - dt.timedelta(days=29)
+        active = {oldest: 5, self.TODAY: 1}
+        self.assertEqual(self.recent(active)[:2], (6, 2))
+        tomorrow = self.TODAY + dt.timedelta(days=1)
+        self.assertEqual(self.recent(active, today=tomorrow)[:2], (1, 1))
+
+    def test_month_boundary(self):
+        # Non-leap 2026: Jan 31 + all 28 days of February + Mar 1 make exactly 30 days.
+        active = {dt.date(2026, 1, 30): 9, dt.date(2026, 1, 31): 1, dt.date(2026, 2, 14): 2, dt.date(2026, 3, 1): 3}
+        self.assertEqual(self.recent(active, today=dt.date(2026, 3, 1)), (6, 3, dt.date(2026, 1, 31)))
+
+    def test_year_boundary(self):
+        active = {dt.date(2025, 12, 15): 9, dt.date(2025, 12, 16): 1, dt.date(2025, 12, 31): 1,
+                  dt.date(2026, 1, 1): 1, dt.date(2026, 1, 14): 1}
+        self.assertEqual(self.recent(active, today=dt.date(2026, 1, 14)), (4, 4, dt.date(2025, 12, 16)))
+
+    def test_leap_year_february(self):
+        # Leap 2028: Feb 1 .. Feb 29 + Mar 1 make 30 days, so Jan 31 falls outside ...
+        active = {dt.date(2028, 1, 31): 9, dt.date(2028, 2, 1): 1, dt.date(2028, 2, 29): 2, dt.date(2028, 3, 1): 1}
+        self.assertEqual(self.recent(active, today=dt.date(2028, 3, 1)), (4, 3, dt.date(2028, 2, 1)))
+        # ... whereas in non-leap 2027 the same window reaches back to Jan 31.
+        active = {dt.date(2027, 1, 30): 9, dt.date(2027, 1, 31): 1, dt.date(2027, 3, 1): 1}
+        self.assertEqual(self.recent(active, today=dt.date(2027, 3, 1)), (2, 2, dt.date(2027, 1, 31)))
+
+    def test_zero_activity(self):
+        self.assertEqual(self.recent({})[:2], (0, 0))
+
+    def test_only_older_activity(self):
+        s = g.summarise(user_ending(self.TODAY, {dt.date(2026, 5, 1): 7, dt.date(2026, 9, 27): 1}))
+        self.assertEqual((s["total"], s["recent_total"], s["recent_active"]), (8, 0, 0))
+
+    def test_calendar_shorter_than_the_window_is_rejected(self):
+        g.recent(days([1] * 30))
+        with self.assertRaisesRegex(g.DataError, "29 days, fewer than 30"):
+            g.recent(days([1] * 29))
+        with self.assertRaisesRegex(g.DataError, "fewer than 30"):
+            stats([1] * 20)
+
+    def test_missing_day_inside_the_window_is_rejected(self):
+        u = user([1] * 35)
+        del u["contributionsCollection"]["contributionCalendar"]["weeks"][3]["contributionDays"][2]
+        u["contributionsCollection"]["contributionCalendar"]["totalContributions"] = 34
+        with self.assertRaisesRegex(g.DataError, "gaps"):
+            g.summarise(u)
+
+    def test_described_and_independent_of_yearly_figures(self):
+        s = g.summarise(user_ending(self.TODAY, {dt.date(2026, 3, 1): 10, self.TODAY: 1}))
+        self.assertEqual((s["total"], s["active_days"], s["recent_total"], s["recent_active"]), (11, 2, 1, 1))
+        self.assertIn("Last 30 days, today included: 1 contribution on 1 day.", g.describe(s))
+
+
 class CalendarValidation(unittest.TestCase):
     def test_duplicate_day_is_counted_once(self):
-        u = user([1, 2, 3])
-        days = u["contributionsCollection"]["contributionCalendar"]["weeks"][0]["contributionDays"]
-        days.append(dict(days[1]))
-        s = g.summarise(u, LOGIN)
-        self.assertEqual((s["total"], s["active_days"], s["weeks"]), (6, 3, [(dt.date(2025, 10, 26), 3, 6)]))
+        u = user([1, 2, 3] + [0] * 32)
+        calendar_days_of(u).append(dict(calendar_days_of(u)[1]))
+        s = g.summarise(u)
+        self.assertEqual((s["total"], s["active_days"], s["weeks"][0]), (6, 3, (dt.date(2025, 10, 26), 7, 6)))
 
     def test_conflicting_duplicate_day_is_rejected(self):
-        u = user([1, 2, 3])
-        days = u["contributionsCollection"]["contributionCalendar"]["weeks"][0]["contributionDays"]
-        days.append({"date": days[1]["date"], "contributionCount": 7})
+        u = user([1, 2, 3] + [0] * 32)
+        calendar_days_of(u).append({"date": calendar_days_of(u)[1]["date"], "contributionCount": 7})
         with self.assertRaisesRegex(g.DataError, "conflicting"):
-            g.summarise(u, LOGIN)
+            g.summarise(u)
 
     def test_missing_days_are_rejected_not_bridged(self):
-        u = user([1, 1, 0, 1, 1])
-        del u["contributionsCollection"]["contributionCalendar"]["weeks"][0]["contributionDays"][2]
+        u = user([1, 1, 0, 1, 1] + [0] * 30)
+        del calendar_days_of(u)[2]
         with self.assertRaisesRegex(g.DataError, "gaps"):
-            g.summarise(u, LOGIN)
+            g.summarise(u)
 
     def test_missing_week_is_rejected(self):
-        u = user([1] * 21)
+        u = user([1] * 35)
         del u["contributionsCollection"]["contributionCalendar"]["weeks"][1]
         with self.assertRaisesRegex(g.DataError, "gaps"):
-            g.summarise(u, LOGIN)
+            g.summarise(u)
 
     def test_total_must_match_days(self):
-        u = user([1, 2])
+        u = user([1, 2] + [0] * 30)
         u["contributionsCollection"]["contributionCalendar"]["totalContributions"] = 5
         with self.assertRaisesRegex(g.DataError, "total"):
-            g.summarise(u, LOGIN)
+            g.summarise(u)
 
     def test_empty_calendar_is_rejected(self):
-        u = user([0])
+        u = user([0] * 30)
         u["contributionsCollection"]["contributionCalendar"]["weeks"] = []
         with self.assertRaisesRegex(g.DataError, "empty"):
-            g.summarise(u, LOGIN)
+            g.summarise(u)
 
     def test_partial_response_is_rejected(self):
         for path in (("contributionsCollection",), ("contributionsCollection", "contributionCalendar"),
-                     ("contributionsCollection", "totalCommitContributions"), ("repositories",)):
-            u = user([1, 2])
+                     ("contributionsCollection", "totalCommitContributions"),
+                     ("contributionsCollection", "restrictedContributionsCount")):
+            u = user([1, 2] + [0] * 30)
             parent = u
             for key in path[:-1]:
                 parent = parent[key]
             parent[path[-1]] = None
             with self.subTest(path=path), self.assertRaisesRegex(g.DataError, "missing"):
-                g.summarise(u, LOGIN)
+                g.summarise(u)
+
+    def test_missing_day_count_is_rejected(self):
+        u = user([1, 2] + [0] * 30)
+        del calendar_days_of(u)[0]["contributionCount"]
+        with self.assertRaisesRegex(g.DataError, "missing contributionCount"):
+            g.summarise(u)
 
     def test_negative_count_is_rejected(self):
-        u = user([1, 2])
-        u["contributionsCollection"]["contributionCalendar"]["weeks"][0]["contributionDays"][0]["contributionCount"] = -1
+        u = user([1, 2] + [0] * 30)
+        calendar_days_of(u)[0]["contributionCount"] = -1
         u["contributionsCollection"]["contributionCalendar"]["totalContributions"] = 1
         with self.assertRaisesRegex(g.DataError, "invalid"):
-            g.summarise(u, LOGIN)
+            g.summarise(u)
 
     def test_stale_calendar_is_rejected(self):
-        s = stats([1] * 10)  # ends Tue Nov 4 2025
-        g.check_fresh(s, dt.date(2025, 11, 4))
-        g.check_fresh(s, dt.date(2025, 11, 5))  # runner already past midnight UTC
-        g.check_fresh(s, dt.date(2025, 11, 3))  # token dated ahead of UTC
-        with self.assertRaisesRegex(g.DataError, "ends 2025-11-04"):
-            g.check_fresh(s, dt.date(2025, 11, 7))
+        s = stats([1] * 30)  # ends Mon Nov 24 2025
+        g.check_fresh(s, dt.date(2025, 11, 24))
+        g.check_fresh(s, dt.date(2025, 11, 25))  # runner already past midnight UTC
+        g.check_fresh(s, dt.date(2025, 11, 23))  # token dated ahead of UTC
+        with self.assertRaisesRegex(g.DataError, "ends 2025-11-24"):
+            g.check_fresh(s, dt.date(2025, 11, 27))
 
 
-class Languages(unittest.TestCase):
-    def test_bytes_are_summed_across_repositories(self):
-        s = stats([0], [repo("a", {"Python": 300, "Java": 100}), repo("b", {"Python": 100, "Java": 500})])
-        self.assertEqual(s["languages"], [("Java", 0.6), ("Python", 0.4)])
-        self.assertEqual(s["repos_counted"], 2)
-
-    def test_ties_are_ordered_by_name(self):
-        s = stats([0], [repo("a", {"Rust": 1, "Go": 1, "C": 1})])
-        self.assertEqual([n for n, _ in s["languages"]], ["C", "Go", "Rust"])
-
-    def test_forks_archives_mirrors_and_profile_repo_are_excluded(self):
-        repos = [repo("kept", {"Java": 10}), repo("f", {"Go": 99}, fork=True),
-                 repo("old", {"Perl": 99}, archived=True), repo("m", {"C": 99}, mirror=True),
-                 repo(LOGIN.upper(), {"Python": 99})]
-        s = stats([0], repos)
-        self.assertEqual(s["languages"], [("Java", 1.0)])
-        self.assertEqual(s["repos_skipped"], {"fork": 1, "archived": 1, "mirror": 1, "profile": 1})
-
-    def test_private_repositories_never_reach_the_card(self):
-        repos = [repo("public-app", {"Java": 10}), repo("secret-project", {"Dart": 1_000_000}, private=True)]
-        s = stats([0], repos)
-        self.assertEqual(s["languages"], [("Java", 1.0)])
-        self.assertEqual(s["repos_skipped"], {"private": 1})
-        for mobile in (False, True):
-            svg = g.render(s, GLYPHS, mobile=mobile)
-            self.assertNotIn("Dart", svg)
-            self.assertNotIn("secret", svg.lower())
-
-    def test_missing_visibility_fails_closed(self):
-        r = repo("a", {"Java": 1})
-        del r["isPrivate"]
-        with self.assertRaisesRegex(g.DataError, "isPrivate"):
-            stats([0], [r])
-
-    def test_repository_listed_twice_is_counted_once(self):
-        s = stats([0], [repo("a", {"Java": 10}), repo("b", {"Go": 10}), repo("A", {"Java": 10})])
-        self.assertEqual(s["languages"], [("Go", 0.5), ("Java", 0.5)])
-
-    def test_duplicate_language_edge_is_counted_once(self):
-        r = repo("a", {"Java": 10, "Go": 10})
-        r["languages"]["edges"].append({"size": 10, "node": {"name": "Java"}})
-        self.assertEqual(stats([0], [r])["languages"], [("Go", 0.5), ("Java", 0.5)])
-        r["languages"]["edges"].append({"size": 11, "node": {"name": "Java"}})
-        with self.assertRaisesRegex(g.DataError, "conflicting"):
-            stats([0], [r])
-
-    def test_no_public_code(self):
-        s = stats([0], [repo("empty", {})])
-        self.assertEqual(s["languages"], [])
-        self.assertIn("Languages by code size in public repositories: none yet.", g.describe(s))
-
+class Description(unittest.TestCase):
     def test_private_contribution_counts_are_labelled(self):
-        s = stats([2, 3], restricted=4)
+        s = stats([2, 3] + [0] * 28, restricted=4)
         self.assertIn("5 contributions (including 4 private, as counts only)", g.describe(s))
+
+    def test_private_visibility_is_always_stated(self):
+        self.assertIn("Private contributions count only when GitHub shows them on the public profile.",
+                      g.describe(stats([0] * 30)))
+
+    def test_languages_are_no_longer_described(self):
+        self.assertNotIn("anguage", g.describe(stats([1] * 30)))
 
 
 class FakeAPI:
-    """Stands in for urllib.request.urlopen, answering by query type and cursor."""
+    """Stands in for urllib.request.urlopen, answering the contributions query."""
 
-    def __init__(self, contributions, repo_pages, language_pages=None):
-        self.contributions, self.repo_pages = contributions, repo_pages
-        self.language_pages = language_pages or {}
+    def __init__(self, contributions):
+        self.contributions = contributions
         self.requests = []
 
     def __call__(self, req, timeout):
-        body = json.loads(req.data)
-        self.requests.append(body)
-        query, after = body["query"], body["variables"].get("after")
-        if "contributionsCollection" in query:
-            data = {"user": self.contributions}
-        elif "repository(" in query:
-            data = {"repository": {"languages": self.language_pages[body["variables"]["name"]][after]}}
-        else:
-            data = {"user": {"repositories": self.repo_pages[after]}}
-        return io.BytesIO(json.dumps({"data": data}).encode())
-
-
-def page(nodes, next_cursor=None, key="nodes"):
-    return {"pageInfo": {"hasNextPage": next_cursor is not None, "endCursor": next_cursor}, key: nodes}
+        self.requests.append(json.loads(req.data))
+        return io.BytesIO(json.dumps({"data": {"user": self.contributions}}).encode())
 
 
 class Fetch(unittest.TestCase):
@@ -302,45 +315,27 @@ class Fetch(unittest.TestCase):
         patcher = mock.patch.object(g.time, "sleep")
         self.sleep = patcher.start()
         self.addCleanup(patcher.stop)
-        self.contributions = user([1, 2])["contributionsCollection"]
+        self.contributions = user([1, 2] + [0] * 30)["contributionsCollection"]
 
     def fetch(self, api):
         with mock.patch.object(g.urllib.request, "urlopen", api):
             return g.fetch(LOGIN, "token-123")
 
-    def test_paginates_repositories_and_languages(self):
-        big = repo("big", {"Python": 50})
-        big["languages"]["pageInfo"] = {"hasNextPage": True, "endCursor": "L1"}
-        api = FakeAPI(
-            {"contributionsCollection": self.contributions},
-            {None: page([repo("a", {"Java": 10}), big], "R1"), "R1": page([repo("c", {"Go": 40})])},
-            {"big": {None: page([{"size": 50, "node": {"name": "Python"}}], "L1", key="edges"),
-                     "L1": page([{"size": 100, "node": {"name": "Zig"}}], key="edges")}},
-        )
+    def test_one_request_for_the_contribution_calendar_only(self):
+        api = FakeAPI({"contributionsCollection": self.contributions})
         u = self.fetch(api)
-        self.assertEqual([r["name"] for r in u["repositories"]["nodes"]], ["a", "big", "c"])
-        s = g.summarise(u, LOGIN)
-        self.assertEqual(dict(s["languages"]), {"Zig": 0.5, "Python": 0.25, "Go": 0.2, "Java": 0.05})
-        self.assertEqual(len(api.requests), 5)  # contributions, 2 repo pages, 2 language pages
-        self.assertTrue(all("token-123" not in json.dumps(r) for r in api.requests))
-
-    def test_cursor_that_does_not_advance_is_rejected(self):
-        api = FakeAPI({"contributionsCollection": self.contributions}, {None: page([], "R1"), "R1": page([], "R1")})
-        with self.assertRaisesRegex(g.DataError, "cursor"):
-            self.fetch(api)
-
-    def test_null_repository_node_is_rejected(self):
-        api = FakeAPI({"contributionsCollection": self.contributions}, {None: page([None])})
-        with self.assertRaisesRegex(g.DataError, "missing"):
-            self.fetch(api)
+        self.assertEqual(g.summarise(u)["total"], 3)
+        self.assertEqual(len(api.requests), 1)
+        self.assertEqual(api.requests[0]["variables"], {"login": LOGIN})
+        self.assertNotIn("repositor", api.requests[0]["query"])
+        self.assertNotIn("token-123", json.dumps(api.requests))
 
     def test_unknown_user_is_rejected(self):
-        api = FakeAPI(None, {})
         with self.assertRaisesRegex(g.DataError, "missing user"):
-            self.fetch(api)
+            self.fetch(FakeAPI(None))
 
     def test_server_errors_are_retried(self):
-        api = FakeAPI({"contributionsCollection": self.contributions}, {None: page([])})
+        api = FakeAPI({"contributionsCollection": self.contributions})
         calls = []
 
         def flaky(req, timeout):
@@ -349,8 +344,8 @@ class Fetch(unittest.TestCase):
                 raise urllib.error.HTTPError(g.API, 502, "Bad Gateway", {}, None)
             return api(req, timeout)
 
-        self.assertEqual(self.fetch(flaky)["repositories"]["nodes"], [])
-        self.assertEqual(len(calls), 3)
+        self.assertEqual(g.summarise(self.fetch(flaky))["total"], 3)
+        self.assertEqual(len(calls), 2)
         self.sleep.assert_called_once_with(2)
 
     def test_bad_credentials_are_not_retried(self):
@@ -400,7 +395,7 @@ class Main(unittest.TestCase):
         return out.getvalue(), {n: (self.dir / n).read_bytes() for n in ("activity.svg", "activity-mobile.svg")}
 
     def test_unchanged_data_regenerates_identical_files(self):
-        u = user([0, 1, 2, 0, 3] * 70, [repo("a", {"Java": 7, "C": 3})])
+        u = user([0, 1, 2, 0, 3] * 70)
         _, first = self.run_from(u)
         _, second = self.run_from(u)
         self.assertEqual(first, second)
@@ -408,13 +403,14 @@ class Main(unittest.TestCase):
     def test_new_contribution_updates_the_card(self):
         counts = [0] * 366
         counts[-3:] = [2, 1, 0]
-        _, before = self.run_from(user(counts, [repo("a", {"Java": 1})]))
+        _, before = self.run_from(user(counts))
         counts[-1] = 4  # a contribution lands today
-        log, after = self.run_from(user(counts, [repo("a", {"Java": 1})]))
+        log, after = self.run_from(user(counts))
         self.assertNotEqual(before["activity.svg"], after["activity.svg"])
         self.assertNotEqual(before["activity-mobile.svg"], after["activity-mobile.svg"])
         self.assertIn("7 contributions in the past year on 3 days; current streak 3 days", log)
-        self.assertIn(b"current streak 3 days", after["activity.svg"])
+        self.assertIn(b"Last 30 days, today included: 7 contributions on 3 days.", after["activity.svg"])
+        self.assertIn("last 30 days from 2026-09-27", log)
 
     def test_failed_fetch_leaves_existing_cards_untouched(self):
         for name in ("activity.svg", "activity-mobile.svg"):
@@ -428,31 +424,46 @@ class Main(unittest.TestCase):
         self.assertEqual({(self.dir / n).read_text() for n in ("activity.svg", "activity-mobile.svg")},
                          {"previous card"})
 
+    def test_short_calendar_leaves_existing_cards_untouched(self):
+        (self.dir / "activity.svg").write_text("previous card")
+        src = self.dir / "response.json"
+        src.write_text(json.dumps(user([1] * 12)))
+        with self.assertRaisesRegex(SystemExit, "fewer than 30"):
+            g.main(["--login", LOGIN, "--out", str(self.dir), "--from-json", str(src)])
+        self.assertEqual((self.dir / "activity.svg").read_text(), "previous card")
+
     def test_stale_live_response_leaves_existing_cards_untouched(self):
         (self.dir / "activity.svg").write_text("previous card")
         with mock.patch.dict(os.environ, {"GITHUB_TOKEN": "t"}), \
-                mock.patch.object(g, "fetch", return_value=user([1] * 7, start=dt.date(2020, 1, 5))):
-            with self.assertRaisesRegex(SystemExit, "ends 2020-01-11"):
+                mock.patch.object(g, "fetch", return_value=user([1] * 35, start=dt.date(2020, 1, 5))):
+            with self.assertRaisesRegex(SystemExit, "ends 2020-02-08"):
                 g.main(["--login", LOGIN, "--out", str(self.dir)])
         self.assertEqual((self.dir / "activity.svg").read_text(), "previous card")
 
 
 class SVGOutput(unittest.TestCase):
     def test_valid_svg_with_stable_dimensions(self):
-        for n_langs in (0, 1, 4, 7):
-            langs = {f"L{i}": 10 + i for i in range(n_langs)}
-            s = stats([0, 1, 5, 0] * 92, [repo("a", langs)] if langs else [])
-            rows = len(s["languages"])
+        for name, counts in (("zero", [0] * 367), ("sparse", [0, 1, 5, 0] * 92), ("dense", [40] * 367)):
+            s = stats(counts, commits=9_999)
             desktop, mobile = g.render(s, GLYPHS), g.render(s, GLYPHS, mobile=True)
-            with self.subTest(languages=n_langs):
+            with self.subTest(activity=name):
                 g.validate(desktop)
                 g.validate(mobile)
                 self.assertIn('viewBox="0 0 1200 470" width="1200" height="470"', desktop)
-                height = 892 + max(rows - 1, 0) * 48 + 72
-                self.assertIn(f'viewBox="0 0 720 {height}" width="720" height="{height}"', mobile)
+                self.assertIn('viewBox="0 0 720 1044" width="720" height="1044"', mobile)
+
+    def test_figures_stay_inside_their_columns(self):
+        # Widest realistic values: the year row must end before the divider, the 30-day pair inside 1144.
+        t = g.Type(GLYPHS)
+        year = [g.figure_width(t, v, u, lab, sz, 13) for v, u, lab, sz in
+                ((99_999, None, "CONTRIBUTIONS", 84), (366, None, "ACTIVE DAYS", 48),
+                 (366, "DAYS", "LONGEST STREAK", 48), (9_999, None, "COMMITS", 48))]
+        self.assertLess(56 + sum(year) + 3 * 36, 822)
+        recent = [g.figure_width(t, v, None, lab, 48, 13) for v, lab in ((9_999, "CONTRIBUTIONS"), (30, "ACTIVE DAYS"))]
+        self.assertLessEqual(854 + sum(recent) + 36, 1144)
 
     def test_no_external_resources(self):
-        svg = g.render(stats([1] * 30, [repo("a", {"Java": 1})]), GLYPHS)
+        svg = g.render(stats([1] * 30), GLYPHS)
         self.assertNotIn("http://", svg.replace('xmlns="http://www.w3.org/2000/svg"', ""))
         self.assertNotIn("https://", svg)
 

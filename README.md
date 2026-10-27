@@ -48,7 +48,7 @@
 <p align="center">
   <picture>
     <source media="(max-width: 600px)" srcset="assets/activity-mobile.svg">
-    <img src="assets/activity.svg" width="100%" alt="GitHub activity over the past year: total contributions, active days, longest streak, commits, contributions per week, and languages by code volume in public repositories.">
+    <img src="assets/activity.svg" width="100%" alt="GitHub activity: contributions, active days, longest streak and commits over the past year; contributions and active days in the last 30 days; and contributions per week.">
   </picture>
   <br>
   <sub>Rendered daily from public GitHub data by a workflow in this repository.</sub>
